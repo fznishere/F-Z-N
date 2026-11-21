@@ -1,1 +1,102 @@
 
+name: Build signed INS4N3 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build Android release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Locate Expo project source
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$GITHUB_WORKSPACE/package.json" ]]; then
+            echo "path=." >> "$GITHUB_OUTPUT"
+          elif [[ -f "$GITHUB_WORKSPACE/ins4n3-source.zip" ]]; then
+            mkdir -p "$GITHUB_WORKSPACE/_ins4n3_source"
+            unzip -q "$GITHUB_WORKSPACE/ins4n3-source.zip" -d "$GITHUB_WORKSPACE/_ins4n3_source"
+            test -f "$GITHUB_WORKSPACE/_ins4n3_source/package.json"
+            echo "path=_ins4n3_source" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Expo project found. Put the source in the repository root or upload ins4n3-source.zip at the repository root."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ steps.project.outputs.path }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ steps.project.outputs.path }}
+        run: npm ci
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Expo and EAS
+        working-directory: ${{ steps.project.outputs.path }}
+        run: |
+          npm install --global eas-cli
+          npx expo --version
+          eas --version
+
+      - name: Check Expo project configuration
+        working-directory: ${{ steps.project.outputs.path }}
+        run: |
+          npx expo config --type public
+          npx expo-doctor || true
+
+      - name: Build signed Android APK
+        working-directory: ${{ steps.project.outputs.path }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${EXPO_TOKEN:-}" ]]; then
+            echo "Missing GitHub secret: EXPO_TOKEN"
+            exit 1
+          fi
+          eas build --platform android --profile preview --non-interactive --wait
+
+      - name: Download APK from EAS
+        working-directory: ${{ steps.project.outputs.path }}
+        run: |
+          set -euo pipefail
+          APK_URL="$(eas build:list --platform android --status finished --limit 1 --json | node -e '
+          let s="";
+          process.stdin.on("data",d=>s+=d);
+          process.stdin.on("end",()=>{
+            const builds=JSON.parse(s);
+            const url=builds[0]?.artifacts?.buildUrl;
+            if(!url) process.exit(1);
+            console.log(url);
+          });')"
+          curl -fL "$APK_URL" -o "$GITHUB_WORKSPACE/INS4N3.apk"
+          test -s "$GITHUB_WORKSPACE/INS4N3.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: INS4N3-APK
+          path: INS4N3.apk
+          if-no-files-found: error
+          retention-days: 30
+          
